@@ -13,7 +13,16 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+num_threads = "6"
+import os
+os.environ["OMP_NUM_THREADS"] = num_threads
+os.environ["OPENBLAS_NUM_THREADS"] = num_threads
+os.environ["MKL_NUM_THREADS"] = num_threads
+os.environ["VECLIB_MAXIMUM_THREADS"] = num_threads
+os.environ["NUMEXPR_NUM_THREADS"] = num_threads
+
 import embeddings
+import sentence_embeddings
 from cupy_utils import *
 
 import argparse
@@ -50,6 +59,11 @@ def topk_mean(m, k, inplace=False):  # TODO Assuming that axis is 1
         m[ind0, ind1] = minimum
     return ans / k
 
+def cupy_svd(x, full_matrices=True):
+    xp = get_array_module(x)
+    x = asnumpy(x)
+    U, s, VT = numpy.linalg.svd(x, full_matrices=full_matrices)
+    return xp.asarray(U), xp.asarray(s), xp.asarray(VT)
 
 def main():
     # Parse command line arguments
@@ -58,11 +72,15 @@ def main():
     parser.add_argument('trg_input', help='the input target embeddings')
     parser.add_argument('src_output', help='the output source embeddings')
     parser.add_argument('trg_output', help='the output target embeddings')
+    parser.add_argument('--src_txt_file')
+    parser.add_argument('--tgt_txt_file')
+    parser.add_argument("--supervised_matrix_output")
     parser.add_argument('--encoding', default='utf-8', help='the character encoding for input/output (defaults to utf-8)')
     parser.add_argument('--precision', choices=['fp16', 'fp32', 'fp64'], default='fp32', help='the floating-point precision (defaults to fp32)')
     parser.add_argument('--cuda', action='store_true', help='use cuda (requires cupy)')
     parser.add_argument('--batch_size', default=10000, type=int, help='batch size (defaults to 10000); does not affect results, larger is usually faster but uses more memory')
     parser.add_argument('--seed', type=int, default=0, help='the random seed (defaults to 0)')
+    parser.add_argument('--device', type=int, default=0, help='ID of GPU to use (defaults to 0)')
 
     recommended_group = parser.add_argument_group('recommended settings', 'Recommended settings for different scenarios')
     recommended_type = recommended_group.add_mutually_exclusive_group()
@@ -153,6 +171,7 @@ def main():
             print('ERROR: Install CuPy for CUDA support', file=sys.stderr)
             sys.exit(-1)
         xp = get_cupy()
+        xp.cuda.Device(args.device).use()
         x = xp.asarray(x)
         z = xp.asarray(z)
     else:
@@ -171,12 +190,21 @@ def main():
     src_indices = []
     trg_indices = []
     if args.init_unsupervised:
-        sim_size = min(x.shape[0], z.shape[0]) if args.unsupervised_vocab <= 0 else min(x.shape[0], z.shape[0], args.unsupervised_vocab)
-        u, s, vt = xp.linalg.svd(x[:sim_size], full_matrices=False)
-        xsim = (u*s).dot(u.T)
-        u, s, vt = xp.linalg.svd(z[:sim_size], full_matrices=False)
-        zsim = (u*s).dot(u.T)
-        del u, s, vt
+        if args.src_txt_file and args.tgt_txt_file:
+            src_sent_emb, tgt_sent_emb = sentence_embeddings.preprocess((args.src_txt_file, args.tgt_txt_file), (src_words, trg_words), xp)
+            sim_size = min(src_sent_emb.shape[0], tgt_sent_emb.shape[0]) if args.unsupervised_vocab <= 0 else min(src_sent_emb.shape[0], tgt_sent_emb.shape[0], args.unsupervised_vocab)
+            u, s, vt = xp.linalg.svd(src_sent_emb[:sim_size], full_matrices=False)
+            xsim = (u*s).dot(u.T)
+            u, s, vt = xp.linalg.svd(tgt_sent_emb[:sim_size], full_matrices=False)
+            zsim = (u*s).dot(u.T)
+            del u, s, vt, src_sent_emb, tgt_sent_emb
+        else:
+            sim_size = min(x.shape[0], z.shape[0]) if args.unsupervised_vocab <= 0 else min(x.shape[0], z.shape[0], args.unsupervised_vocab)
+            u, s, vt = xp.linalg.svd(x[:sim_size], full_matrices=False)
+            xsim = (u*s).dot(u.T)
+            u, s, vt = xp.linalg.svd(z[:sim_size], full_matrices=False)
+            zsim = (u*s).dot(u.T)
+            del u, s, vt
         xsim.sort(axis=1)
         zsim.sort(axis=1)
         embeddings.normalize(xsim, args.normalize)
@@ -308,6 +336,10 @@ def main():
             # STEP 2: Orthogonal mapping
             wx2, s, wz2_t = xp.linalg.svd(xw[src_indices].T.dot(zw[trg_indices]))
             wz2 = wz2_t.T
+            if args.supervised_matrix_output is not None:
+                xp.save(args.supervised_matrix_output + "_wx", wx2)
+                xp.save(args.supervised_matrix_output + "_s", s)
+                xp.save(args.supervised_matrix_output + "_wz", wz2)
             xw = xw.dot(wx2)
             zw = zw.dot(wz2)
 
@@ -390,7 +422,7 @@ def main():
 
             # Logging
             duration = time.time() - t
-            if args.verbose:
+            if args.verbose and it % 10 == 0:
                 print(file=sys.stderr)
                 print('ITERATION {0} ({1:.2f}s)'.format(it, duration), file=sys.stderr)
                 print('\t- Objective:        {0:9.4f}%'.format(100 * objective), file=sys.stderr)
