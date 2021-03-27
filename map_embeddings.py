@@ -191,13 +191,9 @@ def main():
     trg_indices = []
     if args.init_unsupervised:
         if args.src_txt_file and args.tgt_txt_file:
-            src_sent_emb, tgt_sent_emb = sentence_embeddings.preprocess((args.src_txt_file, args.tgt_txt_file), (src_words, trg_words), xp)
-            sim_size = min(src_sent_emb.shape[0], tgt_sent_emb.shape[0]) if args.unsupervised_vocab <= 0 else min(src_sent_emb.shape[0], tgt_sent_emb.shape[0], args.unsupervised_vocab)
-            u, s, vt = xp.linalg.svd(src_sent_emb[:sim_size], full_matrices=False)
-            xsim = (u*s).dot(u.T)
-            u, s, vt = xp.linalg.svd(tgt_sent_emb[:sim_size], full_matrices=False)
-            zsim = (u*s).dot(u.T)
-            del u, s, vt, src_sent_emb, tgt_sent_emb
+            xsim, zsim = sentence_embeddings.preprocess((args.src_txt_file, args.tgt_txt_file), (src_words, trg_words), xp)
+            sim_size = min(xsim.shape[0], zsim.shape[0]) if args.unsupervised_vocab <= 0 else min(xsim.shape[0], zsim.shape[0], args.unsupervised_vocab)
+            xsim, zsim = xsim[:sim_size], zsim[:sim_size]
         else:
             sim_size = min(x.shape[0], z.shape[0]) if args.unsupervised_vocab <= 0 else min(x.shape[0], z.shape[0], args.unsupervised_vocab)
             u, s, vt = xp.linalg.svd(x[:sim_size], full_matrices=False)
